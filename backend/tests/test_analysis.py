@@ -84,3 +84,30 @@ def test_horizon_report_buckets_by_lead_time():
     leads = {r["leadFromHours"]: r["n"] for r in rows}
     # Leads: 16.5h, 14.5h, 15.5h, 12.5h -> all in the 12-18h bucket.
     assert leads == {12: 4}
+
+
+def _day_pairs(day: str, publish: str, forecast: float, actual: float):
+    f = [_fc(publish, f"{day}T{h:02d}:00:00Z", forecast) for h in range(24)]
+    a = [{"startTime": f"{day}T{h:02d}:00:00Z", "generation": actual} for h in range(24)]
+    return f, a
+
+
+def test_correction_uses_only_days_settled_before_decision():
+    # D-2 (13 Jan): forecast twice the actual -> factor 0.5.
+    f1, a1 = _day_pairs("2026-01-13", "2026-01-12T09:30:00Z", 2000, 1000)
+    # D-1 (14 Jan) is not fully metered at gate closure and must be ignored.
+    f2, a2 = _day_pairs("2026-01-14", "2026-01-13T09:30:00Z", 1000, 9000)
+    ds = A.Dataset(a1 + a2, f1 + f2)
+    corr = A.correction(ds, date(2026, 1, 15), 11)
+    assert corr["factor"] == pytest.approx(0.5)
+    assert corr["trainingTo"] == "2026-01-13"
+    assert corr["trainingHours"] == 24
+
+
+def test_day_ahead_view_applies_correction():
+    f1, a1 = _day_pairs("2026-01-13", "2026-01-12T09:30:00Z", 2000, 1000)
+    f3, a3 = _day_pairs("2026-01-15", "2026-01-14T09:30:00Z", 4000, 2000)
+    view = A.day_ahead_view(A.Dataset(a1 + a3, f1 + f3), date(2026, 1, 15), 11)
+    assert view["slots"][0]["corrected"] == pytest.approx(2000)
+    assert view["correctedMetrics"]["mae"] == pytest.approx(0)
+    assert view["metrics"]["mae"] == pytest.approx(2000)

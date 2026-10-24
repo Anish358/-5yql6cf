@@ -27,3 +27,4 @@ dist/
 .idea/
 .vercel
 .env*
+!.env.example

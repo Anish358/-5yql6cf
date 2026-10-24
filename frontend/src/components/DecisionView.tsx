@@ -9,23 +9,27 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { api, type Accuracy, type DayAhead, type Vintages } from '../api'
+import { useState } from 'react'
+import Markdown from 'react-markdown'
+import { api, type Accuracy, type AIReply, type DayAhead, type Vintages } from '../api'
 import {
   fmtDate,
   fmtDateTime,
   fmtGW,
   fmtGWh,
   fmtMW,
-  fmtPct,
+  fmtShortDate,
   fmtSignedGW,
   fmtTime,
 } from '../format'
 import { useAsync } from '../useAsync'
+import { ToolChips } from './AnalystView'
 import { Card, ErrorState, Legend, Loading, Tile, TooltipBox, type TooltipRow } from './ui'
 
 const C = {
   actual: 'var(--series-actual)',
   forecast: 'var(--series-forecast)',
+  corrected: 'var(--series-corrected)',
   band: 'var(--band)',
   muted: 'var(--series-muted)',
   grid: 'var(--grid)',
@@ -52,12 +56,44 @@ export function DecisionView({
   return (
     <div className="stack">
       <DecisionBanner d={day.data} />
+      <MorningBrief key={key} deliveryDate={deliveryDate} cutoffHour={cutoffHour} />
       <DecisionTiles d={day.data} accuracy={accuracy} />
       <ForecastChart d={day.data} accuracy={accuracy} />
       {vint.data && <VintageChart v={vint.data} d={day.data} />}
       <HindsightTiles d={day.data} />
       <HourlyTable d={day.data} />
     </div>
+  )
+}
+
+function MorningBrief({ deliveryDate, cutoffHour }: { deliveryDate: string; cutoffHour: number }) {
+  const [state, setState] = useState<{ busy: boolean; reply?: AIReply; error?: string }>({ busy: false })
+  const run = () => {
+    setState({ busy: true })
+    api
+      .aiBrief(deliveryDate, cutoffHour)
+      .then((reply) => setState({ busy: false, reply }))
+      .catch((e: Error) => setState({ busy: false, error: e.message }))
+  }
+  return (
+    <section className="card brief">
+      <div className="card-head">
+        <div>
+          <h2>AI morning brief</h2>
+          <p className="sub">A trader-ready summary for this delivery day, written from the data available at decision time.</p>
+        </div>
+        <button className="btn primary" onClick={run} disabled={state.busy}>
+          {state.busy ? 'Writing…' : state.reply ? 'Regenerate' : 'Generate brief'}
+        </button>
+      </div>
+      {state.error && <div className="msg error">{state.error}</div>}
+      {state.reply && (
+        <div className="md">
+          <ToolChips calls={state.reply.toolCalls} />
+          <Markdown>{state.reply.reply}</Markdown>
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -93,24 +129,25 @@ function DecisionBanner({ d }: { d: DayAhead }) {
 
 function DecisionTiles({ d, accuracy }: { d: DayAhead; accuracy: Accuracy | null }) {
   const f = d.slots.map((s) => s.forecast).filter((x): x is number => x != null)
-  const p90 = accuracy?.shortfallBuffers.find((b) => b.coveragePct === 90)?.bufferMW
-  const planning = p90 != null ? Math.max(0, d.forecastEnergyMWh - p90 * f.length) : null
+  const p90 = accuracy?.correctedShortfallBuffers.find((b) => b.coveragePct === 90)?.bufferMW
+  const planning = p90 != null ? Math.max(0, d.correctedEnergyMWh - p90 * f.length) : null
   const minIdx = f.indexOf(Math.min(...f))
   const minSlot = d.slots.filter((s) => s.forecast != null)[minIdx]
+  const factor = d.correction.factor
 
   return (
     <>
       <div className="section-label">What the desk sees at decision time</div>
       <div className="tiles">
         <Tile
-          label="Forecast wind energy"
+          label="Elexon forecast energy"
           value={fmtGWh(d.forecastEnergyMWh)}
-          hint={`Average ${fmtGW(d.forecastEnergyMWh / Math.max(1, f.length))}`}
+          hint={`${fmtGW(Math.min(...f))} – ${fmtGW(Math.max(...f))} · lowest ${minSlot ? fmtTime(minSlot.startTime) : '—'}`}
         />
         <Tile
-          label="Forecast range"
-          value={`${fmtGW(Math.min(...f))} – ${fmtGW(Math.max(...f))}`}
-          hint={minSlot ? `Lowest hour starts ${fmtTime(minSlot.startTime)}` : undefined}
+          label="Corrected forecast energy"
+          value={fmtGWh(d.correctedEnergyMWh)}
+          hint={`× ${factor.toFixed(2)} learned from ${fmtShortDate(d.correction.trainingFrom)}–${fmtShortDate(d.correction.trainingTo)}`}
         />
         <Tile
           emphasis
@@ -118,14 +155,14 @@ function DecisionTiles({ d, accuracy }: { d: DayAhead; accuracy: Accuracy | null
           value={fmtGWh(planning)}
           hint={
             p90 != null
-              ? `Forecast less ${fmtGW(p90, 2)} every hour (Jan P90 over-forecast)`
+              ? `Corrected forecast less ${fmtGW(p90, 2)} every hour`
               : 'Loading accuracy…'
           }
         />
         <Tile
-          label="Extra energy vs raw forecast"
-          value={p90 != null ? fmtGWh(p90 * f.length) : '—'}
-          hint="To source from the market to stay covered 9 days in 10"
+          label="Wind shortfall to cover"
+          value={p90 != null ? fmtGWh(d.forecastEnergyMWh - (planning ?? 0)) : '—'}
+          hint="Raw forecast minus planning wind: buy this from the market"
         />
       </div>
     </>
@@ -133,18 +170,19 @@ function DecisionTiles({ d, accuracy }: { d: DayAhead; accuracy: Accuracy | null
 }
 
 function ForecastChart({ d, accuracy }: { d: DayAhead; accuracy: Accuracy | null }) {
-  const p10 = accuracy?.overall.p10
-  const p90 = accuracy?.overall.p90
+  const p10 = accuracy?.overallCorrected.p10
+  const p90 = accuracy?.overallCorrected.p90
   const byHour = new Map(d.slots.map((s) => [s.startTime, s]))
   const rows = d.actualsHalfHourly.map((a) => {
     const s = byHour.get(a.startTime)
-    const f = s?.forecast ?? null
+    const c = s?.corrected ?? null
     return {
       t: a.startTime,
       label: fmtTime(a.startTime),
       actual: a.actual,
-      forecast: f,
-      band: f != null && p10 != null && p90 != null ? [f - p90, f - p10] : null,
+      forecast: s?.forecast ?? null,
+      corrected: c,
+      band: c != null && p10 != null && p90 != null ? [c - p90, c - p10] : null,
     }
   })
   const showBand = p10 != null && p90 != null
@@ -152,15 +190,16 @@ function ForecastChart({ d, accuracy }: { d: DayAhead; accuracy: Accuracy | null
   return (
     <Card
       title="Day-ahead wind forecast vs what actually happened"
-      subtitle="Forecast as available at gate closure (hourly) against metered wind generation (half-hourly), GW"
+      subtitle="Forecast as available at gate closure (hourly) against metered wind generation (half-hourly)"
       right={
         <Legend
           items={[
-            { label: 'Forecast at decision time', color: C.forecast },
+            { label: 'Elexon forecast', color: C.forecast },
+            { label: 'Corrected forecast', color: C.corrected },
             ...(showBand
-              ? [{ label: 'Expected range (P10–P90 of Jan errors)', color: C.band, kind: 'box' as const }]
+              ? [{ label: 'Expected range (P10–P90)', color: C.band, kind: 'box' as const }]
               : []),
-            { label: 'Actual generation', color: C.actual },
+            { label: 'Actual', color: C.actual },
           ]}
         />
       }
@@ -190,6 +229,15 @@ function ForecastChart({ d, accuracy }: { d: DayAhead; accuracy: Accuracy | null
               isAnimationActive={false}
             />
             <Line
+              dataKey="corrected"
+              stroke={C.corrected}
+              strokeWidth={2}
+              strokeDasharray="6 3"
+              dot={false}
+              connectNulls
+              isAnimationActive={false}
+            />
+            <Line
               dataKey="actual"
               stroke={C.actual}
               strokeWidth={2}
@@ -203,10 +251,9 @@ function ForecastChart({ d, accuracy }: { d: DayAhead; accuracy: Accuracy | null
                 const r = payload[0].payload as (typeof rows)[number]
                 const rowsOut: TooltipRow[] = [
                   { label: 'Actual', value: fmtMW(r.actual), color: C.actual },
-                  { label: 'Forecast', value: fmtMW(r.forecast), color: C.forecast },
+                  { label: 'Elexon forecast', value: fmtMW(r.forecast), color: C.forecast },
+                  { label: 'Corrected', value: fmtMW(r.corrected), color: C.corrected },
                 ]
-                if (r.forecast != null && r.actual != null)
-                  rowsOut.push({ label: 'Error (F − A)', value: fmtMW(r.forecast - r.actual) })
                 if (r.band)
                   rowsOut.push({
                     label: 'Expected range',
@@ -321,26 +368,57 @@ function VintageChart({ v, d }: { v: Vintages; d: DayAhead }) {
 
 function HindsightTiles({ d }: { d: DayAhead }) {
   const m = d.metrics
+  const mc = d.correctedMetrics
+  const gain = m.mae ? (1 - mc.mae / m.mae) * 100 : 0
   return (
     <>
       <div className="section-label">In hindsight — how good was that forecast?</div>
       <div className="tiles">
         <Tile label="Actual wind energy" value={fmtGWh(d.actualEnergyMWh)} hint="Over hours with both values" />
-        <Tile label="Mean absolute error" value={fmtGW(m.mae, 2)} hint={`${fmtPct(m.nmaePct)} of mean actual`} />
         <Tile
-          label="Bias (forecast − actual)"
-          value={fmtSignedGW(m.bias)}
-          hint={m.bias > 0 ? 'Over-forecast: desk would have been short' : 'Under-forecast: desk would have been long'}
+          label="Elexon forecast error (MAE)"
+          value={fmtGW(m.mae, 2)}
+          hint={`Bias ${fmtSignedGW(m.bias)} · ${m.bias > 0 ? 'desk would have been short' : 'desk would have been long'}`}
         />
-        <Tile label="Worst hour" value={fmtGW(m.maxAbsError, 2)} hint="Largest absolute miss" />
+        <Tile
+          emphasis
+          label="Corrected forecast error (MAE)"
+          value={fmtGW(mc.mae, 2)}
+          hint={gain >= 0 ? `${gain.toFixed(0)}% lower than Elexon forecast` : `${(-gain).toFixed(0)}% higher on this day`}
+        />
+        <Tile label="Worst hour" value={fmtGW(m.maxAbsError, 2)} hint="Largest absolute miss (Elexon forecast)" />
       </div>
     </>
   )
 }
 
+function downloadCsv(d: DayAhead) {
+  const header = ['start_time_utc', 'hour_uk', 'forecast_mw', 'corrected_mw', 'publish_time_utc', 'lead_hours', 'actual_mw', 'error_mw']
+  const lines = d.slots.map((s) =>
+    [s.startTime, fmtTime(s.startTime), s.forecast, s.corrected?.toFixed(0), s.publishTime, s.leadHours, s.actual, s.error]
+      .map((v) => v ?? '')
+      .join(','),
+  )
+  const blob = new Blob([[header.join(','), ...lines].join('\n')], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `wind-day-ahead-${d.deliveryDate}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function HourlyTable({ d }: { d: DayAhead }) {
   return (
-    <Card title="Hourly detail" subtitle="Every value used in the charts above">
+    <Card
+      title="Hourly detail"
+      subtitle="Every value used in the charts above"
+      right={
+        <button className="btn" onClick={() => downloadCsv(d)}>
+          Download CSV
+        </button>
+      }
+    >
       <details>
         <summary>Show table</summary>
         <div className="table-wrap">
@@ -349,6 +427,7 @@ function HourlyTable({ d }: { d: DayAhead }) {
               <tr>
                 <th>Hour (UK)</th>
                 <th>Forecast (MW)</th>
+                <th>Corrected (MW)</th>
                 <th>Published</th>
                 <th>Lead (h)</th>
                 <th>Actual (MW)</th>
@@ -360,6 +439,7 @@ function HourlyTable({ d }: { d: DayAhead }) {
                 <tr key={s.startTime}>
                   <td>{fmtTime(s.startTime)}</td>
                   <td>{s.forecast?.toLocaleString('en-GB') ?? '—'}</td>
+                  <td>{s.corrected != null ? Math.round(s.corrected).toLocaleString('en-GB') : '—'}</td>
                   <td>{s.publishTime ? fmtDateTime(s.publishTime) : '—'}</td>
                   <td>{s.leadHours?.toFixed(1) ?? '—'}</td>
                   <td>{s.actual?.toLocaleString('en-GB') ?? '—'}</td>

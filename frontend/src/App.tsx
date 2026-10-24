@@ -1,12 +1,21 @@
 import { useState } from 'react'
 import { api } from './api'
 import { AccuracyView } from './components/AccuracyView'
+import { AnalystView } from './components/AnalystView'
 import { DecisionView } from './components/DecisionView'
+import { ProcurementView } from './components/ProcurementView'
 import { ErrorState, Loading } from './components/ui'
 import { addDays, fmtDateTime, hourLabel } from './format'
 import { useAsync } from './useAsync'
 
-type Tab = 'decision' | 'accuracy'
+type Tab = 'decision' | 'procurement' | 'accuracy' | 'analyst'
+
+const TABS: { id: Tab; label: string; badge?: string }[] = [
+  { id: 'decision', label: 'Day-ahead decision' },
+  { id: 'procurement', label: 'Procurement plan' },
+  { id: 'accuracy', label: 'Forecast accuracy' },
+  { id: 'analyst', label: 'AI analyst', badge: 'AI' },
+]
 
 const CUTOFF_HOURS = [6, 8, 9, 10, 11, 12, 14, 16, 18]
 
@@ -42,15 +51,15 @@ export default function App() {
 
       <nav className="toolbar" aria-label="View controls">
         <div className="tabs" role="tablist">
-          <button className="tab" role="tab" aria-selected={tab === 'decision'} onClick={() => setTab('decision')}>
-            Day-ahead decision
-          </button>
-          <button className="tab" role="tab" aria-selected={tab === 'accuracy'} onClick={() => setTab('accuracy')}>
-            Forecast accuracy
-          </button>
+          {TABS.map((t) => (
+            <button key={t.id} className="tab" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+              {t.label}
+              {t.badge && <span className="badge">{t.badge}</span>}
+            </button>
+          ))}
         </div>
         <div className="controls">
-          {tab === 'decision' && (
+          {tab !== 'accuracy' && (
             <div className="control">
               <button
                 className="icon-btn"
@@ -94,18 +103,34 @@ export default function App() {
       </nav>
 
       <main>
-        {tab === 'decision' ? (
+        {tab === 'decision' && (
           <DecisionView deliveryDate={deliveryDate} cutoffHour={cutoffHour} accuracy={accuracy.data} />
-        ) : accuracy.error ? (
-          <ErrorState message={accuracy.error} />
-        ) : (
-          <AccuracyView accuracy={accuracy.data} cutoffHour={cutoffHour} />
         )}
+        {tab === 'procurement' && (
+          <ProcurementView deliveryDate={deliveryDate} cutoffHour={cutoffHour} accuracy={accuracy.data} />
+        )}
+        {tab === 'accuracy' &&
+          (accuracy.error ? (
+            <ErrorState message={accuracy.error} />
+          ) : (
+            <AccuracyView
+              accuracy={accuracy.data}
+              cutoffHour={cutoffHour}
+              onSelectDay={(d) => {
+                setDeliveryDate(d)
+                setTab('decision')
+                window.scrollTo({ top: 0, behavior: 'smooth' })
+              }}
+            />
+          ))}
+        <div hidden={tab !== 'analyst'}>
+          <AnalystView deliveryDate={deliveryDate} cutoffHour={cutoffHour} />
+        </div>
       </main>
 
       <footer className="footer">
-        Forecast = latest WINDFOR run published at or before the decision time on D-1. Error = forecast − actual,
-        compared hourly.
+        Forecast = latest WINDFOR run published at or before the decision time on D-1. Corrected forecast = forecast ×
+        actual/forecast ratio of the 14 days metered before the decision. Error = forecast − actual, compared hourly.
       </footer>
     </div>
   )

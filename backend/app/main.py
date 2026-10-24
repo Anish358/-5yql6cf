@@ -1,12 +1,14 @@
 import os
 from datetime import date
 from functools import lru_cache
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from pydantic import BaseModel, Field
 
-from app import analysis
+from app import ai, analysis
 from app.config import DEFAULT_CUTOFF_HOUR, DELIVERY_END, DELIVERY_START
 from app.store import get_dataset, load_snapshot
 
@@ -19,7 +21,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -84,6 +86,47 @@ def vintages(delivery_date: date, cutoff_hour: int = CutoffHour) -> dict:
     return analysis.vintages_for_day(
         get_dataset(), _check_delivery_date(delivery_date), cutoff_hour
     )
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=20)
+    delivery_date: date | None = None
+    cutoff_hour: int | None = Field(None, ge=0, le=23)
+
+
+class BriefRequest(BaseModel):
+    delivery_date: date
+    cutoff_hour: int = Field(DEFAULT_CUTOFF_HOUR, ge=0, le=23)
+
+
+def _ai_call(fn, *args) -> dict:
+    try:
+        return fn(*args)
+    except ai.AIUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+    except ai.AIError as e:
+        raise HTTPException(502, str(e)) from e
+
+
+@api.post("/ai/chat")
+def ai_chat(req: ChatRequest) -> dict:
+    return _ai_call(
+        ai.chat,
+        [m.model_dump() for m in req.messages],
+        req.delivery_date.isoformat() if req.delivery_date else None,
+        req.cutoff_hour,
+    )
+
+
+@api.post("/ai/brief")
+def ai_brief(req: BriefRequest) -> dict:
+    _check_delivery_date(req.delivery_date)
+    return _ai_call(ai.brief, req.delivery_date.isoformat(), req.cutoff_hour)
 
 
 app.include_router(api)

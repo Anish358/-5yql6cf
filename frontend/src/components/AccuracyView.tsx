@@ -20,6 +20,7 @@ import { Card, Legend, Loading, Tile, TooltipBox } from './ui'
 const C = {
   actual: 'var(--series-actual)',
   forecast: 'var(--series-forecast)',
+  corrected: 'var(--series-corrected)',
   error: 'var(--series-error)',
   muted: 'var(--series-muted)',
   grid: 'var(--grid)',
@@ -30,11 +31,21 @@ const gwTick = (v: number) => `${+(v / 1000).toFixed(1)} GW`
 const MARGIN = { top: 8, right: 8, bottom: 0, left: 0 }
 const BAR_RADIUS: [number, number, number, number] = [4, 4, 0, 0]
 
-export function AccuracyView({ accuracy, cutoffHour }: { accuracy: Accuracy | null; cutoffHour: number }) {
+export function AccuracyView({
+  accuracy,
+  cutoffHour,
+  onSelectDay,
+}: {
+  accuracy: Accuracy | null
+  cutoffHour: number
+  onSelectDay: (date: string) => void
+}) {
   const horizon = useAsync(() => api.horizon(6), 'h6')
   if (!accuracy) return <Loading what="accuracy analysis" />
   const o = accuracy.overall
+  const oc = accuracy.overallCorrected
   const p90 = accuracy.shortfallBuffers.find((b) => b.coveragePct === 90)!
+  const p90c = accuracy.correctedShortfallBuffers.find((b) => b.coveragePct === 90)!
 
   return (
     <div className="stack">
@@ -43,7 +54,12 @@ export function AccuracyView({ accuracy, cutoffHour }: { accuracy: Accuracy | nu
         {fmtShortDate(accuracy.deliveryEnd)}), the forecast available at {hourLabel(cutoffHour)} on D-1 was{' '}
         <strong>above actual wind in {fmtPct(o.overForecastPct)} of hours</strong>, by{' '}
         <strong>{fmtGW(o.bias, 2)} on average</strong>. Taking the raw forecast at face value would have left the
-        desk systematically short; holding back <strong>{fmtGW(p90.bufferMW, 2)}</strong> covers 9 in 10 hours.
+        desk systematically short. A correction learned from the previous 14 settled days cuts the error from{' '}
+        <strong>{fmtGW(o.mae, 2)} to {fmtGW(oc.mae, 2)}</strong> and the buffer needed to cover 9 in 10 hours from{' '}
+        <strong>
+          {fmtGW(p90.bufferMW, 2)} to {fmtGW(p90c.bufferMW, 2)}
+        </strong>
+        .
       </div>
 
       <div className="tiles">
@@ -51,10 +67,17 @@ export function AccuracyView({ accuracy, cutoffHour }: { accuracy: Accuracy | nu
         <Tile label="RMSE" value={fmtGW(o.rmse, 2)} hint="Penalises large misses" />
         <Tile label="Bias (forecast − actual)" value={fmtSignedGW(o.bias)} hint="Positive = over-forecast" />
         <Tile label="P90 over-forecast" value={fmtGW(o.p90, 2)} hint={`P10 ${fmtSignedGW(o.p10)} · median ${fmtSignedGW(o.p50)}`} />
-        <Tile label="Worst single hour" value={fmtGW(o.maxAbsError, 2)} hint="Largest absolute miss" />
+        <Tile
+          emphasis
+          label="Corrected forecast MAE"
+          value={fmtGW(oc.mae, 2)}
+          hint={`${((1 - oc.mae / o.mae) * 100).toFixed(0)}% lower · bias ${fmtSignedGW(oc.bias)}`}
+        />
       </div>
 
+      <CalendarCard accuracy={accuracy} onSelectDay={onSelectDay} />
       <BufferCard accuracy={accuracy} />
+      <CorrectionCard accuracy={accuracy} />
       <DailyCharts accuracy={accuracy} />
       <div className="grid-2">
         <Card
@@ -139,18 +162,117 @@ function BufferCard({ accuracy }: { accuracy: Accuracy }) {
   return (
     <Card
       title="How much to hold back from the forecast"
-      subtitle="Wind assumed = forecast − buffer. Buffers are empirical percentiles of January day-ahead over-forecast errors."
+      subtitle="Wind assumed = corrected forecast − buffer. Buffers are empirical percentiles of January day-ahead over-forecast errors."
     >
       <div className="tiles">
-        {accuracy.shortfallBuffers.map((b) => (
+        {accuracy.correctedShortfallBuffers.map((b, i) => (
           <Tile
             key={b.coveragePct}
             emphasis={b.coveragePct === 90}
             label={`Covered in ${b.coveragePct}% of hours`}
             value={fmtGW(b.bufferMW, 2)}
-            hint={`${fmtGW(b.bufferMW * 24, 0)}h extra procurement per day`}
+            hint={`vs ${fmtGW(accuracy.shortfallBuffers[i].bufferMW, 2)} using the raw Elexon forecast`}
           />
         ))}
+      </div>
+    </Card>
+  )
+}
+
+function CorrectionCard({ accuracy }: { accuracy: Accuracy }) {
+  const rows = accuracy.daily.map((d) => ({ ...d, label: fmtShortDate(d.date) }))
+  return (
+    <Card
+      title="Corrected vs Elexon forecast, day by day"
+      subtitle="Daily MAE. The correction scales each day's forecast by actual ÷ forecast over the 14 days fully metered before the decision — no future data."
+      right={
+        <Legend
+          items={[
+            { label: 'Elexon forecast', color: C.forecast },
+            { label: 'Corrected forecast', color: C.corrected },
+          ]}
+        />
+      }
+    >
+      <div style={{ height: 240 }}>
+        <ResponsiveContainer>
+          <LineChart data={rows} margin={MARGIN}>
+            <CartesianGrid stroke={C.grid} vertical={false} />
+            <XAxis dataKey="label" interval={4} tickLine={false} axisLine={{ stroke: C.grid }} />
+            <YAxis tickFormatter={gwTick} tickLine={false} axisLine={false} width={56} />
+            <Line dataKey="mae" stroke={C.forecast} strokeWidth={2} dot={false} isAnimationActive={false} />
+            <Line dataKey="correctedMae" stroke={C.corrected} strokeWidth={2} dot={false} isAnimationActive={false} />
+            <Tooltip
+              cursor={{ stroke: 'var(--text-3)', strokeDasharray: '3 3' }}
+              content={({ active, payload }) => {
+                if (!active || !payload?.length) return null
+                const d = payload[0].payload
+                return (
+                  <TooltipBox
+                    title={fmtDate(d.date)}
+                    rows={[
+                      { label: 'Elexon MAE', value: fmtGW(d.mae, 2), color: C.forecast },
+                      { label: 'Corrected MAE', value: fmtGW(d.correctedMae, 2), color: C.corrected },
+                      { label: 'Scale factor', value: `× ${d.correctionFactor.toFixed(2)}` },
+                    ]}
+                  />
+                )
+              }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </Card>
+  )
+}
+
+const HEAT = ['#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95', '#0d366b']
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function CalendarCard({ accuracy, onSelectDay }: { accuracy: Accuracy; onSelectDay: (d: string) => void }) {
+  const days = accuracy.daily
+  const max = Math.max(...days.map((d) => d.mae))
+  const min = Math.min(...days.map((d) => d.mae))
+  const step = (v: number) => Math.min(HEAT.length - 1, Math.floor(((v - min) / (max - min || 1)) * HEAT.length))
+  const offset = (new Date(`${days[0].date}T12:00:00Z`).getUTCDay() + 6) % 7
+  return (
+    <Card
+      title="Which days went wrong?"
+      subtitle="Daily MAE of the Elexon day-ahead forecast. Click a day to open it in the decision view."
+      right={
+        <div className="heat-legend">
+          <span>{fmtGW(min, 1)}</span>
+          {HEAT.map((c) => (
+            <i key={c} style={{ background: c }} />
+          ))}
+          <span>{fmtGW(max, 1)}</span>
+        </div>
+      }
+    >
+      <div className="calendar">
+        {WEEKDAYS.map((w) => (
+          <div key={w} className="calendar-head">
+            {w}
+          </div>
+        ))}
+        {Array.from({ length: offset }, (_, i) => (
+          <div key={`pad${i}`} />
+        ))}
+        {days.map((d) => {
+          const k = step(d.mae)
+          return (
+            <button
+              key={d.date}
+              className="calendar-cell"
+              style={{ background: HEAT[k], color: k >= 3 ? '#fff' : '#0b0b0b' }}
+              onClick={() => onSelectDay(d.date)}
+              title={`${fmtDate(d.date)}: MAE ${fmtGW(d.mae, 2)}, bias ${fmtSignedGW(d.bias)}`}
+            >
+              <span className="calendar-day">{fmtShortDate(d.date)}</span>
+              <span className="calendar-val">{fmtGW(d.mae, 1)}</span>
+            </button>
+          )
+        })}
       </div>
     </Card>
   )

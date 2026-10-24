@@ -138,9 +138,38 @@ def _paired(slots: list[dict]) -> tuple[list[float], list[float]]:
     return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
+CORRECTION_WINDOW_DAYS = 14
+
+
+def correction(ds: Dataset, delivery_date: date, cutoff_hour: int) -> dict:
+    """Walk-forward scale factor: actual/forecast energy over the trailing settled days.
+
+    Training days are D-2 back to D-(1+window): D-1 is still in progress at gate closure,
+    so only days fully metered before the decision are used (no look-ahead).
+    """
+    days = [delivery_date - timedelta(days=k) for k in range(2, 2 + CORRECTION_WINDOW_DAYS)]
+    f_sum = a_sum = 0.0
+    n = 0
+    for d in days:
+        f, a = _paired(day_ahead_slots(ds, d, cutoff_hour))
+        f_sum += sum(f)
+        a_sum += sum(a)
+        n += len(f)
+    return {
+        "factor": a_sum / f_sum if f_sum else 1.0,
+        "trainingFrom": days[-1].isoformat(),
+        "trainingTo": days[0].isoformat(),
+        "trainingHours": n,
+    }
+
+
 def day_ahead_view(ds: Dataset, delivery_date: date, cutoff_hour: int) -> dict:
     slots = day_ahead_slots(ds, delivery_date, cutoff_hour)
+    corr = correction(ds, delivery_date, cutoff_hour)
+    for s in slots:
+        s["corrected"] = s["forecast"] * corr["factor"] if s["forecast"] is not None else None
     f, a = _paired(slots)
+    fc = [s["corrected"] for s in slots if s["error"] is not None]
     forecast_slots = [s for s in slots if s["forecast"] is not None]
     used_publishes = sorted({s["publishTime"] for s in forecast_slots})
     return {
@@ -153,25 +182,32 @@ def day_ahead_view(ds: Dataset, delivery_date: date, cutoff_hour: int) -> dict:
             for t in delivery_half_hours(delivery_date)
         ],
         "forecastEnergyMWh": sum(s["forecast"] for s in forecast_slots),
+        "correctedEnergyMWh": sum(s["corrected"] for s in forecast_slots),
         "actualEnergyMWh": sum(a) if a else None,
         "metrics": error_metrics(f, a),
+        "correction": corr,
+        "correctedMetrics": error_metrics(fc, a),
     }
 
 
 def accuracy_report(
     ds: Dataset, start: date, end: date, cutoff_hour: int, bin_mw: int = 1000
 ) -> dict:
-    all_f, all_a, daily = [], [], []
+    all_f, all_a, all_c, daily = [], [], [], []
     by_hour: dict[int, tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
 
     d = start
     while d <= end:
         slots = day_ahead_slots(ds, d, cutoff_hour)
         f, a = _paired(slots)
+        factor = correction(ds, d, cutoff_hour)["factor"]
+        c = [x * factor for x in f]
         all_f += f
         all_a += a
+        all_c += c
         m = error_metrics(f, a)
         if m["n"]:
+            mc = error_metrics(c, a)
             daily.append(
                 {
                     "date": d.isoformat(),
@@ -180,6 +216,8 @@ def accuracy_report(
                     "meanActual": m["meanActual"],
                     "meanForecast": m["meanForecast"],
                     "maxAbsError": m["maxAbsError"],
+                    "correctedMae": mc["mae"],
+                    "correctionFactor": factor,
                 }
             )
         for s in slots:
@@ -194,23 +232,27 @@ def accuracy_report(
     for e in errors:
         hist[math.floor(e / bin_mw) * bin_mw] += 1
 
-    # MW to hold back from the forecast so wind shortfalls are covered q% of the time.
-    buffers = [
-        {"coveragePct": q, "bufferMW": max(0.0, percentile(errors, q))} for q in (50, 80, 90, 95)
-    ]
-
     return {
         "cutoffHour": cutoff_hour,
         "deliveryStart": start.isoformat(),
         "deliveryEnd": end.isoformat(),
         "overall": error_metrics(all_f, all_a),
+        "overallCorrected": error_metrics(all_c, all_a),
+        "correctedShortfallBuffers": _buffers([x - y for x, y in zip(all_c, all_a, strict=True)]),
         "daily": daily,
         "byHourOfDay": [{"hour": h, **_summary(*by_hour[h])} for h in sorted(by_hour)],
         "histogram": [
             {"binStart": b, "binEnd": b + bin_mw, "count": hist[b]} for b in sorted(hist)
         ],
-        "shortfallBuffers": buffers,
+        "shortfallBuffers": _buffers(errors),
     }
+
+
+def _buffers(errors: list[float]) -> list[dict]:
+    """MW to hold back from the forecast so wind shortfalls are covered q% of the time."""
+    return [
+        {"coveragePct": q, "bufferMW": max(0.0, percentile(errors, q))} for q in (50, 80, 90, 95)
+    ]
 
 
 def _summary(f: list[float], a: list[float]) -> dict:

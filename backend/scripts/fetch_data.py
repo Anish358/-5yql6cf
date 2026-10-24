@@ -6,8 +6,8 @@ from datetime import UTC, datetime, time, timedelta
 from app.config import DELIVERY_END, DELIVERY_START, SNAPSHOT_PATH
 from app.elexon import fetch_wind_actuals, fetch_wind_forecasts
 
-# Forecasts are published up to ~3 days ahead; go back far enough for the horizon analysis.
-FORECAST_LOOKBACK = timedelta(days=4)
+# Extra history before the first delivery day so the walk-forward correction has training data.
+TRAINING_LOOKBACK = timedelta(days=16)
 
 
 def _dedupe(rows: list[dict], key: tuple[str, ...]) -> list[dict]:
@@ -22,8 +22,8 @@ def _dedupe(rows: list[dict], key: tuple[str, ...]) -> list[dict]:
 
 def main() -> None:
     day = timedelta(days=1)
-    actuals = fetch_wind_actuals(DELIVERY_START - day, DELIVERY_END + day)
-    publish_from = datetime.combine(DELIVERY_START, time(), UTC) - FORECAST_LOOKBACK
+    actuals = fetch_wind_actuals(DELIVERY_START - TRAINING_LOOKBACK, DELIVERY_END + day)
+    publish_from = datetime.combine(DELIVERY_START, time(), UTC) - TRAINING_LOOKBACK - 3 * day
     publish_to = datetime.combine(DELIVERY_END + timedelta(days=1), time(), UTC)
     forecasts = fetch_wind_forecasts(publish_from, publish_to)
 
