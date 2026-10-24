@@ -2,7 +2,7 @@
 
 A web app for a GB utility's day-ahead purchasing team. It shows **the national wind forecast that was actually available when the buy decision had to be made**, and **how accurate that forecast has been**, so the team can size how much extra power to procure.
 
-**Live app:** _<Vercel URL — added after deployment>_
+**Live app:** https://5yql6cf.vercel.app
 
 Data: Elexon BMRS, national wind only — actual generation from [`FUELHH`](https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/FUELHH/stream) (`fuelType = WIND`) and forecasts from [`WINDFOR`](https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/WINDFOR/stream). Scope: purchase decisions made in January 2026.
 
