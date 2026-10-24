@@ -1,0 +1,28 @@
+# Private / not for submission
+PLAN.md
+Assignment.txt
+CLAUDE.md
+.claude/
+notes/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env / OS / IDE
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode/
+.idea/
+.vercel
