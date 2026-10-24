@@ -262,6 +262,11 @@ def _call_gemini(contents: list[dict], system: str) -> dict:
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            raise AIError(
+                "The AI service has reached its usage limit for now. Please try again later; "
+                "every number it would use is also in the charts and tables."
+            ) from e
         detail = e.read().decode(errors="replace")[:300]
         raise AIError(f"Gemini API error {e.code}: {detail}") from e
     except urllib.error.URLError as e:

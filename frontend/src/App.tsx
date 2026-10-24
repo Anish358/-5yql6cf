@@ -127,11 +127,6 @@ export default function App() {
           <AnalystView deliveryDate={deliveryDate} cutoffHour={cutoffHour} />
         </div>
       </main>
-
-      <footer className="footer">
-        Forecast = latest WINDFOR run published at or before the decision time on D-1. Corrected forecast = forecast ×
-        actual/forecast ratio of the 14 days metered before the decision. Error = forecast − actual, compared hourly.
-      </footer>
     </div>
   )
 }

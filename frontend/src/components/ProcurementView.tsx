@@ -84,7 +84,6 @@ export function ProcurementView({
     <div className="stack">
       <Card
         title="Procurement plan inputs"
-        subtitle={`Delivery ${fmtDate(deliveryDate)}. Wind is national GB wind × your share; demand is yours to enter.`}
       >
         <div className="form-row">
           <label className="field">
@@ -147,7 +146,6 @@ export function ProcurementView({
 
       <Card
         title="Hourly purchase plan"
-        subtitle="Bars stack to demand: wind you plan on + power to buy. Line: wind that actually came — below the green bar means the plan was short."
         right={
           <Legend
             items={[
